@@ -596,6 +596,39 @@ def get_volume():
     return vol, muted
 
 
+def get_source_volume():
+    """Return the default audio source volume and mute state."""
+    vol = 0
+    muted = False
+    try:
+        output = subprocess.check_output(
+            ["pactl", "get-source-volume", "@DEFAULT_SOURCE@"],
+            env=dict(os.environ, LANG="C.UTF-8"), text=True
+        )
+        volumes = re.findall(r"/\s+(?P<volume>\d+)%\s+/", output)
+        if volumes:
+            vol = max(int(x) for x in volumes)
+        output = subprocess.check_output(
+            ["pactl", "get-source-mute", "@DEFAULT_SOURCE@"],
+            env=dict(os.environ, LANG="C.UTF-8"), text=True
+        ).strip().lower()
+        muted = output.endswith("yes")
+    except Exception as e:
+        eprint(e)
+    return vol, muted
+
+
+def set_source_volume(percent):
+    """Set the default audio source volume."""
+    percent = max(0, min(100, int(percent)))
+    subprocess.call(["pactl", "set-source-volume", "@DEFAULT_SOURCE@", f"{percent}%"])
+
+
+def toggle_source_mute():
+    """Toggle mute on the default audio source."""
+    subprocess.call(["pactl", "set-source-mute", "@DEFAULT_SOURCE@", "toggle"])
+
+
 def list_sink_inputs():
     """
     Thanks to @fm16191 for https://github.com/fm16191/pactl-json-parser

@@ -336,6 +336,7 @@
   "vertical-padding": "Vertical padding",
   "vertical-window-margin": "Vertical window margin",
   "visibility": "Visibility",
+  "microphone": "Microphone",
   "volume": "Volume",
   "volume-value": "Volume value",
   "volume-tooltip": "Requires `pamixer` or `pactl` commands installed.",

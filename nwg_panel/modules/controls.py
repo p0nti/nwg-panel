@@ -12,7 +12,8 @@ gi.require_version('Gdk', '3.0')
 gi.require_version('GtkLayerShell', '0.1')
 from gi.repository import Gtk, Gdk, GLib, GtkLayerShell
 
-from nwg_panel.tools import (check_key, get_brightness, set_brightness, get_volume, get_balance, set_volume, get_battery,
+from nwg_panel.tools import (check_key, get_brightness, set_brightness, get_volume, get_source_volume,
+                             set_source_volume, toggle_source_mute, get_balance, set_volume, get_battery,
                              update_image, eprint, list_sinks, toggle_mute, create_background_task, list_sink_inputs,
                              is_command, cmd_through_compositor, popen_watcher)
 
@@ -89,6 +90,11 @@ class Controls(Gtk.EventBox):
         self.vol_value = 0
         self.vol_muted = False
 
+        self.mic_icon_name = "audio-input-microphone-symbolic"
+        self.mic_image = Gtk.Image.new_from_icon_name(self.mic_icon_name, Gtk.IconSize.MENU)
+        self.mic_value = 0
+        self.mic_muted = False
+
         self.bat_icon_name = "view-refresh-symbolic"
         self.bat_image = Gtk.Image.new_from_icon_name(self.bat_icon_name, Gtk.IconSize.MENU)
         self.bat_label = Gtk.Label() if settings["show-battery"] else None
@@ -123,7 +129,8 @@ class Controls(Gtk.EventBox):
         if "battery" in settings["components"]:
             self.refresh_bat()
 
-        if settings["volume-subscribe"] and "volume" in settings["components"] and commands["pactl"]:
+        if settings["volume-subscribe"] and ("volume" in settings["components"] or
+                                              "microphone" in settings["components"]) and commands["pactl"]:
             threading.Thread(target=self.volume_watcher, daemon=True).start()
 
     def volume_watcher(self):
@@ -138,11 +145,14 @@ class Controls(Gtk.EventBox):
                     proc.wait(timeout=SUBSCRIBE_CHECK_S)
                 except subprocess.TimeoutExpired:
                     self.volume_watching = True
-                    # the poller skips the volume from now on: read it once here, or the widget would
-                    # show nothing until the first volume event
-                    GLib.idle_add(self.update_volume, get_volume())
+                    # The poller skips watched controls, so read their initial values here.
+                    if "volume" in self.settings["components"]:
+                        GLib.idle_add(self.update_volume, get_volume())
+                    if "microphone" in self.settings["components"]:
+                        GLib.idle_add(self.update_microphone, get_source_volume())
                 for line in proc.stdout:
-                    if ("on sink" in line or "on server" in line) and not self.volume_read_pending:
+                    if ("on sink" in line or "on source" in line or "on server" in line) \
+                            and not self.volume_read_pending:
                         # dragging a slider or starting a stream sends dozens of events: read the
                         # volume once, shortly after the first one (2 pactl processes per read)
                         self.volume_read_pending = True
@@ -155,7 +165,10 @@ class Controls(Gtk.EventBox):
 
     def read_volume_after_event(self):
         self.volume_read_pending = False
-        GLib.idle_add(self.update_volume, get_volume())
+        if "volume" in self.settings["components"]:
+            GLib.idle_add(self.update_volume, get_volume())
+        if "microphone" in self.settings["components"]:
+            GLib.idle_add(self.update_microphone, get_source_volume())
 
     def build_box(self):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -172,6 +185,9 @@ class Controls(Gtk.EventBox):
             box.pack_start(self.vol_image, False, False, 4)
             if self.vol_label:
                 box.pack_start(self.vol_label, False, False, 0)
+
+        if "microphone" in self.settings["components"] and commands["pactl"]:
+            box.pack_start(self.mic_image, False, False, 4)
 
         if "battery" in self.settings["components"]:
             box.pack_start(self.bat_image, False, False, 4)
@@ -206,6 +222,12 @@ class Controls(Gtk.EventBox):
                 GLib.idle_add(self.update_volume, get_volume())
             except Exception as e:
                 print(e)
+
+        if "microphone" in self.settings["components"] and commands["pactl"] and not self.volume_watching:
+            try:
+                GLib.idle_add(self.update_microphone, get_source_volume())
+            except Exception as e:
+                eprint(e)
 
     def brightness_due(self):
         """After repeated failures (no backlight: desktop, HDMI...), only retry now and then
@@ -264,6 +286,17 @@ class Controls(Gtk.EventBox):
                 self.vol_label.set_text(text)
 
         self.vol_value, self.vol_muted = volume
+
+    def update_microphone(self, volume=None):
+        if volume is None:
+            volume = get_source_volume()
+        icon_name = "microphone-sensitivity-muted-symbolic" if volume[1] \
+            else "audio-input-microphone-symbolic"
+        if icon_name != self.mic_icon_name:
+            update_image(self.mic_image, icon_name, self.settings["icon-size"], self.icons_path)
+            self.mic_icon_name = icon_name
+        self.mic_value, self.mic_muted = volume
+        self.popup_window.refresh()
 
     def update_battery(self, value, charging):
         icon_name = bat_icon_name(value, charging)
@@ -356,6 +389,9 @@ class PopupWindow(Gtk.Window):
         self.refresh_count = 0
         self.vol_scale = None
         self.vol_scale_handler = None
+        self.mic_scale = None
+        self.mic_scale_handler = None
+        self.mic_icon_name = "audio-input-microphone-symbolic"
 
         self.per_app_sliders = []
 
@@ -496,6 +532,23 @@ class PopupWindow(Gtk.Window):
                 pactl_eb.connect('button-release-event', self.sink_box.switch_visibility)
                 v_box.pack_start(self.sink_box, False, False, 0)
 
+            add_sep = True
+
+        if "microphone" in settings["components"] and commands["pactl"]:
+            inner_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+            v_box.pack_start(inner_hbox, False, False, 6)
+
+            self.mic_image = Gtk.Image.new_from_icon_name(self.parent.mic_icon_name, Gtk.IconSize.MENU)
+            mic_button = Gtk.EventBox()
+            mic_button.connect("button-release-event", self.toggle_source_mute)
+            mic_button.add(self.mic_image)
+            inner_hbox.pack_start(mic_button, False, False, 6)
+
+            self.mic_scale = Gtk.Scale.new_with_range(orientation=Gtk.Orientation.HORIZONTAL, min=0, max=100, step=1)
+            self.mic_scale.set_increments(0.5, 0.5)
+            self.mic_scale.set_value(self.parent.mic_value)
+            self.mic_scale_handler = self.mic_scale.connect("value-changed", self.set_mic)
+            inner_hbox.pack_start(self.mic_scale, True, True, 5)
             add_sep = True
 
         if "per-app-volume" in settings["components"] and commands["pactl"]:
@@ -702,6 +755,8 @@ class PopupWindow(Gtk.Window):
         if "per-app-volume" in self.settings["components"] and commands["pactl"]:
             self.create_per_app_sliders()
         self.get_balance()
+        if "microphone" in self.settings["components"] and commands["pactl"]:
+            self.parent.update_microphone(get_source_volume())
         self.refresh()
 
     def create_per_app_sliders(self):
@@ -793,6 +848,18 @@ class PopupWindow(Gtk.Window):
                 self.vol_scale.set_draw_value(
                     False if self.parent.vol_value > 100 else True)  # Don't display val out of scale
 
+            if "microphone" in self.settings["components"] and commands["pactl"]:
+                with self.mic_scale.handler_block(self.mic_scale_handler):
+                    self.mic_scale.set_value(self.parent.mic_value)
+                icon_name = "microphone-sensitivity-muted-symbolic" if self.parent.mic_muted \
+                    else "audio-input-microphone-symbolic"
+                if icon_name != self.parent.mic_icon_name:
+                    update_image(self.parent.mic_image, icon_name, self.icon_size, self.icons_path)
+                    self.parent.mic_icon_name = icon_name
+                if icon_name != self.mic_icon_name:
+                    update_image(self.mic_image, icon_name, self.icon_size, self.icons_path)
+                    self.mic_icon_name = icon_name
+
             if "per-app-volume" in self.settings["components"] and commands["pactl"] \
                     and (schedule is False or self.refresh_count % SINK_INPUTS_EVERY == 1):
                 # list input numbers we already have a slider for
@@ -858,6 +925,10 @@ class PopupWindow(Gtk.Window):
                 with self.vol_scale.handler_block(self.vol_scale_handler):
                     self.vol_scale.set_value(self.parent.vol_value)
 
+            if "microphone" in self.settings["components"] and commands["pactl"]:
+                with self.mic_scale.handler_block(self.mic_scale_handler):
+                    self.mic_scale.set_value(self.parent.mic_value)
+
             if "brightness" in self.settings["components"]:
                 with self.bri_scale.handler_block(self.bri_scale_handler):
                     self.bri_scale.set_value(self.parent.bri_value)
@@ -905,6 +976,14 @@ class PopupWindow(Gtk.Window):
         self.parent.vol_value = int(slider.get_value())
         set_volume(self.parent.vol_value, balance=self.balance)
         # self.parent.update_volume()
+
+    def set_mic(self, slider):
+        self.parent.mic_value = int(slider.get_value())
+        set_source_volume(self.parent.mic_value)
+
+    def toggle_source_mute(self, *args):
+        toggle_source_mute()
+        self.parent.update_microphone(get_source_volume())
 
     def close_win(self, w, e):
         self.hide()

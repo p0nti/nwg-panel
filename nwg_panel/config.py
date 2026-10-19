@@ -4574,6 +4574,11 @@ class EditorWrapper(object):
         self.ctrl_comp_volume.set_tooltip_text(voc["volume-tooltip"])
         self.ctrl_comp_volume.set_active("volume" in settings["components"])
 
+        self.ctrl_comp_microphone = builder.get_object("ctrl-comp-microphone")
+        self.ctrl_comp_microphone.set_label(voc["microphone"])
+        self.ctrl_comp_microphone.set_sensitive(is_command("pactl"))
+        self.ctrl_comp_microphone.set_active("microphone" in settings["components"])
+
         self.ctrl_comp_switcher = builder.get_object("output-switcher")
         self.ctrl_comp_switcher.set_label(voc["output-switcher"])
         self.ctrl_comp_switcher.set_sensitive(is_command("pactl") or is_command("pamixer"))
@@ -4745,6 +4750,13 @@ class EditorWrapper(object):
         else:
             if "volume" in settings["components"]:
                 settings["components"].remove("volume")
+
+        if self.ctrl_comp_microphone.get_active():
+            if "microphone" not in settings["components"]:
+                settings["components"].append("microphone")
+        else:
+            if "microphone" in settings["components"]:
+                settings["components"].remove("microphone")
 
         if self.ctrl_per_app_vol.get_active():
             if "per-app-volume" not in settings["components"]:
